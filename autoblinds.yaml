@@ -1,0 +1,116 @@
+esphome:
+  name: shutter
+
+substitutions: # constants
+    servo_transition_length: '2000' # in ms
+    slack: '0.3' # slack in the system as % of servo max rotation angle
+
+globals: 
+  - id: shutter_tilt_var # used for storing tilt value between lambdas
+    type: float
+    initial_value: '0.0'
+
+servo:
+  - id: my_servo
+    output: ledc_output
+    restore: True
+    transition_length: ${servo_transition_length}ms
+    auto_detach_time: 3s
+
+output:
+  - platform: ledc
+    pin: GPIO13
+    id: ledc_output
+    frequency: 50 Hz
+
+cover:
+  - platform: template
+    name: Main shutter
+    id: my_shutter
+    device_class: shutter
+    optimistic: true
+    tilt_action: 
+      - script.execute:
+            id: tilt_shutter
+            next_tilt: !lambda return tilt;
+    tilt_lambda: !lambda |-
+        return id(my_shutter).tilt;
+
+script:
+  - id: tilt_shutter
+    parameters:
+        next_tilt: float
+    then:
+      - if:
+            condition: # if next position same as current position, do nothing
+                lambda: |-
+                    return id(my_shutter).tilt == next_tilt;
+            else:
+              - if:
+                    condition: # if current position < next position
+                        lambda: |-
+                            return id(my_shutter).tilt < next_tilt;
+                    then:
+                      - cover.template.publish: # publish current operation
+                            id: my_shutter
+                            current_operation: OPENING
+                      - lambda: |-
+                            // map angle between [-1 + 2*slack, 1] to account for slack
+                            id(shutter_tilt_var) = -2*(1-${slack})*next_tilt+(1-2*${slack});
+                            // run servo past final point
+                            id(my_servo).write(id(shutter_tilt_var));
+                        # delay while the servo moves + small buffer
+                      - delay: !lambda |- 
+                            return abs(id(my_shutter).tilt - next_tilt) * ${servo_transition_length} + 300;
+                      - lambda: |-
+                            // run servo back to remove slack
+                            id(my_servo).write(id(shutter_tilt_var) + ${slack});
+
+                    else: # if current position < next position
+                      - cover.template.publish: # publish current operation
+                            id: my_shutter
+                            current_operation: CLOSING
+                      - lambda: |-
+                            // map angle between [-1, 1 - 2*slack] to account for slack
+                            id(shutter_tilt_var) = -2*(1-${slack})*next_tilt+1;
+                            // run servo past final point
+                            id(my_servo).write(id(shutter_tilt_var));
+                        # delay while the servo moves + small buffer
+                      - delay: !lambda |- 
+                            return abs(id(my_shutter).tilt - next_tilt) * ${servo_transition_length} + 300;
+                      - lambda: |-
+                            // run servo back to remove slack
+                            id(my_servo).write(id(shutter_tilt_var) - ${slack});
+
+              - cover.template.publish: # publish tilt and state
+                    id: my_shutter
+                    tilt: !lambda 'return next_tilt;'
+                    state: !lambda 'return (next_tilt == 0) ? COVER_CLOSED : COVER_OPEN;'
+                    current_operation: IDLE
+
+esp32:
+    board: esp32dev
+    framework:
+        type: arduino
+
+# Enable logging
+logger:
+
+# Enable Home Assistant API
+api:
+    encryption:
+        key: !secret api_key
+
+ota:
+
+wifi:
+    ssid: !secret wifi_ssid
+    password: !secret wifi_password
+
+    # Enable fallback hotspot (captive portal) in case wifi connection fails
+    ap:
+        ssid: !secret fallback_ssid
+        password: !secret fallback_password
+
+captive_portal:
+    
